@@ -1,0 +1,942 @@
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%% Analysis of BRCA2 MAVE Data.      %%
+%%  Combine NCI and Mayo Studies.    %%
+%% Bi-normal, common variance Model. %%
+%%     Annotated knitr doc           %%
+%% Last Modified  11/25/24 by ESI.   %%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\documentclass{article}
+
+%% begin.rcode setup, include=FALSE
+% opts_chunk$set(fig.path='./figs/',cache.path='./cache/',child.path='../')
+%% end.rcode
+
+\input{preamble.tex}
+
+\title{2024 BRCA2 VuS Joint Analysis of Mayo and NCI MAVE
+  Data\\ Bi--Normal, Common Variance Classification Model with
+  \\ Batch Location And Scaling
+ \\ Run 2}
+%\author{Author1, Author2, Author3}
+\date{\today}
+\begin{document}
+\maketitle
+
+\section{High--Level User--Specified Parameters}
+
+%% begin.rcode
+%  ## T degrees of freedom for measurement error model
+%  t.df<-5
+%  ##
+%  ## Prior Probability Pathogenic, beta distribution parameters:
+%  beta.a<-2.0
+%  beta.b<-8.0  ##mean=0.20, ESS = 10
+%  ## Set List of MCMC Control Parameters:
+%  ##mcmc.pars<-list(iter=10000, ## short run
+% ##                 burn=5000,
+%   ##               thin=10)
+%  ##mcmc.pars<-list(iter=150000, ## long run
+%  ##               burn=50000,
+%  ##               thin=10)
+%  mcmc.pars<-list(iter=550000, ## longer run
+%                  burn=50000,
+%                thin=25)
+%% end.rcode
+
+\section{Start Up}
+
+Set a seed for the random number generators to ensure repeatabability
+and load necessary R libraries.
+
+%% begin.rcode
+%  ## Set Random Seed
+%  set.seed(seed=13)
+%  ## Load custom functions that will be used below:
+%  source("../RFuncs.R",echo=FALSE)
+%  ## Libraries:
+%  ##library(coda)
+%  library(rjags)
+%  library(R2WinBUGS)
+%  library(R2jags)
+%  library(mgcv)
+%% end.rcode
+
+\section{Import and Process Mayo Clinic and NCI Data}
+
+Read in the Mayo Clinic and NCI MAVE data sets and combine them.
+
+%% begin.rcode
+%  load("mayoData.RData")
+%  load("nciDB.RData")
+%  head(MAYOuvDB)
+%  head(NCIuvDB)
+%  table(colnames(MAYOuvDB) %in% colnames(NCIuvDB))
+%  ## drop adSmooth adSmoothSE, not used
+%  MAYOuvDB<-MAYOuvDB[,!(colnames(MAYOuvDB) %in% c("adSmooth","adSmoothSE"))]
+%  table(colnames(NCIuvDB) %in% colnames(MAYOuvDB))
+%  table(NCIuvDB$Experiment == NCIuvDB$batchE)
+%  ## drop Experiment (redundant with batchE)
+%  NCIuvDB<-NCIuvDB[,!(colnames(NCIuvDB) %in% c("Experiment"))]
+%  table(colnames(NCIuvDB) == colnames(MAYOuvDB))
+%  MAYOuvDB$Study<-rep(1,nrow(MAYOuvDB))
+%  NCIuvDB$Study<-rep(2,nrow(NCIuvDB))
+%  NCIuvDB$replicate<-as.character(NCIuvDB$replicate)
+%  MAYOuvDB$replicate<-as.character(MAYOuvDB$replicate)
+%  NCIuvDB$replicate[NCIuvDB$replicate=="R1"]<-"R7"
+%  NCIuvDB$replicate[NCIuvDB$replicate=="R2"]<-"R8"
+%  ## avoid overlapping batch indicators
+%  NCIuvDB$batch<-(max(MAYOuvDB$batch)+NCIuvDB$batch)
+%  temp<-rbind(MAYOuvDB,NCIuvDB)
+%  table(temp$replicate,temp$Study)
+%  table(temp$batch,temp$Study)
+%  temp$day<-as.character(temp$day)
+%  uvDB<-temp; rm(temp)
+%  head(uvDB)
+%% end.rcode
+
+Import training variant labels and check against existing values
+
+%% begin.rcode
+%  newTrainingLabel<-read.csv("variant_type_for_train.csv")
+%  kdel<-unique(newTrainingLabel$uPOS[newTrainingLabel$EventType=="StopGain"])
+%  kneut<-unique(newTrainingLabel$uPOS[newTrainingLabel$EventType=="Synonymous"])
+%  length(kdel)
+%  length(kneut)
+%  known.ids<-c(kdel,kneut)
+%  length(known.ids)
+%  uvDB$label2<-rep(NA,nrow(uvDB))
+%  uvDB$label2[uvDB$variant %in% kdel]<-"P"
+%  uvDB$label2[uvDB$variant %in% kneut]<-"B"
+%  table(uvDB$label,uvDB$label2,useNA="always")
+%% end.rcode
+
+\newpage
+\section{Calibrate Study log Ratio Distributions}
+
+%% begin.rcode, fig.width=5.2, fig.height=5.5
+%  q1<-quantile(uvDB$lRatio[uvDB$Study==1],probs=((seq(1,1000)-0.5)/1000))
+%  q2<-quantile(uvDB$lRatio[uvDB$Study==2],probs=((seq(1,1000)-0.5)/1000))
+%  plot(q2,q1,las=1,main="QQ Plot of Mayo vs NCI log Ratios",
+%       ylab="Mayo",xlab="NCI",las=1)
+%  abline(a=0,b=1,col=2,lwd=2)
+%  abline(a=0,b=(sd(q1)/sd(q2)),lwd=2,col=3)
+%  summary(qq.lm<-lm(q1~q2))
+%  abline(coefficients(qq.lm),lwd=2,col=4)
+%  legend("topleft",inset=0.05,col=c(2,3,4),lwd=3,
+%         legend=c("Diagonal (y=x)","Adjusted for Scale Differential","Adjusted for Location and Scale"),
+%         cex=0.6)
+%  temp<-predict(qq.lm,newdata=data.frame(q2=uvDB$lRatio[uvDB$Study==2]),
+%                interval="none",type="response")
+%  q3<-quantile(temp,probs=((seq(1,1000)-0.5)/1000))
+%  plot(q3,q1,las=1,main="QQ Plot of Mayo vs Adjusted NCI log Ratios",
+%       ylab="Mayo",xlab="Adjusted NCI",las=1)
+%  abline(a=0,b=1,col=2,lwd=2)
+%% end.rcode
+
+Replace original NCI log ratio values with the linearly transformed values:
+
+%% begin.rcode, fig.width=5.2, fig.height=5.5
+%  uvDB$lRatio.Unadjusted <- uvDB$lRatio
+%  uvDB$lRatio[uvDB$Study==2] <- temp
+%  rm(temp)
+%% end.rcode
+
+\newpage
+\section{Exploratory Mixed Effects Model of The Labeled Data}
+
+\subsection{Setup Data Structure}
+
+The following code chunk creates a temporary structure for a mixed
+model analysis of the labeled data.  For use in verifying assumptions.
+
+%% begin.rcode, fig.width=6.5, fig.height=4.0
+%  ############################################
+%  ## Data Set for Analysis of Labeled Data: ##
+%  ############################################
+%  uvKnown<-uvDB[(!is.na(uvDB$label)),]
+%  ## uvKnown<-uvDB[(!is.na(uvDB$label))&(uvDB$Study==1),]
+%  uvKnown$Study<-factor(uvKnown$Study)
+%% end.rcode
+
+\subsection{Mixed Effects Model for the Labeled Variants}
+
+Here we fit a linear mixed model using the labeled variants.  The
+model includes a fixed effect for pathogenicity status
+(\texttt{label}) and (nested) random effects for variant and exon and
+random intercept for label.
+
+%% begin.rcode, fig.width=3.5, fig.height=4.0
+%  lme.out1<-lme(lRatio ~ -1 + label + Study, random= ~ -1+label|Exon/variant,
+%                weights = varIdent(form = ~ 1| Study), data=uvKnown,method="ML")
+%  lme.out2<-lme(lRatio ~ -1 + label*Study, random= ~ -1+label|Exon/variant,
+%                weights = varIdent(form = ~ 1| Study), data=uvKnown,method="ML")
+%  lme.out3<-lme(lRatio ~ -1 + label*Study, random= ~ -1+label|Exon/variant,
+%                data=uvKnown,method="ML")
+%  anova(lme.out1,lme.out2) ## value of interaction given variance model
+%  anova(lme.out3,lme.out2) ## value of variance model given interaction
+%  lme.out2<-lme(lRatio ~ -1 + label*Study, random= ~ -1+label|Exon/variant,
+%                weights = varIdent(form = ~ 1| Study), data=uvKnown,method="REML")
+%  summary(lme.out2)
+%  re<-ranef(lme.out2)
+%  names(re)
+%  names(re[[2]])
+%% end.rcode
+
+In the following code chunk, we check modeling assumptions.
+
+%% begin.rcode, fig.width=7.5, fig.height=8.5
+% par(mfrow=c(2,2))
+%  qqnorm(re[["Exon"]][,1],main="Benign Exon Effects")
+%  abline(a=0,b=sd((re[["Exon"]][,1])),lwd=2,col=2)
+%  qqnorm(re[["Exon"]][,2],main="Pathogenic Exon Effects")
+%  abline(a=0,b=sd((re[["Exon"]][,2])),lwd=2,col=2)
+%  qqnorm(re[["variant"]][,1],main="Variant Effects")
+%  abline(a=0,b=sd((re[["variant"]][,1])),lwd=2,col=2)
+%  resids2<-residuals(lme.out2)
+%  qqnorm(resids2,main="Replicate Effects (Residuals)")
+%  abline(a=0,b=sd(residuals(lme.out2)),lwd=2,col=2)
+%% end.rcode
+
+Looks like a t--distribution with approximately five degrees of
+freedom might be needed for the measurement model:
+
+%% begin.rcode, fig.width=7.5, fig.height=8.5
+%  par(mfrow=c(2,2))
+%  q<-qt(p=((1:nrow(uvKnown) - 0.5)/nrow(uvKnown)),df=5)
+%  emp.q<-sort(resids2)
+%  plot(q,emp.q,main="5df T for Residuals")
+%  abline(a=0,b=coef(lm(emp.q~-1+q)),lwd=2,col=2)
+%  boxplot(resids2~uvKnown$Exon,main="Residuals by Exon")
+%  ##boxplot(resids2~uvKnown$p.b,main="Residuals by Pathogenicity")
+%  boxplot(resids2~uvKnown$label,main="Residuals by Pathogenicity")
+%  boxplot(resids2~uvKnown$Study,
+%          main="Residuals by Study")
+%% end.rcode
+
+\newpage
+\section{Setup Data Structures for Full VarCall Model}
+
+\subsection{Variant Labels}
+
+%% begin.rcode, fig.width=6.5, fig.height=8.5
+%  ########################################
+%  ##  Create Structures for JAGS model: ##
+%  ########################################
+%  ##
+%  ## (1) Variant Labels:
+%  ##
+%  num.b<-length(unique(uvDB$batch))
+%  uvDB$variant<-factor(uvDB$variant)
+%  ##known classifications:
+%  known<-rep(0,length(uvDB$variant))
+%  known[uvDB$variant%in%kdel]<-1     ## known disease associated variant
+%  known[uvDB$variant%in%kneut]<-1    ## known disease neutral variant
+%  known.ids<-unique(levels(factor(uvDB$variant[known==1])))
+%  uv.ids<-unique(levels(factor(uvDB$variant[known==0])))
+%  length(known.ids)
+%  length(uv.ids)
+%  del.known<-rep(NA,length(uvDB$variant))
+%  del.known[uvDB$variant%in%kdel]<-2
+%  del.known[uvDB$variant%in%kneut]<-1
+%  temp<-unique(cbind(as.character(uvDB$variant),as.numeric(uvDB$variant),del.known))
+%  del.known<-temp[,3]
+%  table(del.known)
+%  v.ids<-as.character(temp[,1])
+%  v.codes<-as.numeric(temp[,2])
+%  names(del.known)<-v.ids
+%  names(v.ids)<-v.ids
+%  names(v.codes)<-v.ids
+%  num.v<-length(v.ids)
+%  ## Order variant codes 1 to n.var:
+%  temp<-order(v.codes)
+%  v.codes<-v.codes[temp]
+%  v.ids<-v.ids[temp]
+%  del.known<-del.known[temp]
+%  table(v.codes==sort(v.codes))
+%  table(diff(v.codes))
+%  v.codes[1:4]
+%% end.rcode
+
+\section{JAGS Model Estimation and Summary Code}
+
+\subsection{JAGS Data}
+
+The structure {\texttt{bdat}} is a list containing the data needed for
+fitting the VarCall model using JAGS.
+
+%% begin.rcode, fig.width=6.5, fig.height=8.5
+%      num.b<-length(unique(uvDB$batch))
+%      uvDB$variant<-factor(uvDB$variant)
+%      num.v<-length(v.ids)
+%      eta0<-rep(NA,num.v)
+%      alpha.value<-as.numeric(summary(lme.out2)$tTable[1:2,1])
+%      bdat<-list(f.bv=uvDB$lRatio,tdf=t.df,
+%                 batchM=uvDB$batch,
+%                 variantM=as.numeric(uvDB$variant),
+%                 study=uvDB$Study,
+%                 del=as.integer(del.known),
+%                 V=num.v, B=num.b,M=length(uvDB$lRatio),
+%                 eta=eta0,a.pp=beta.a,b.pp=beta.b,
+%                 alpha=alpha.value)
+%% end.rcode
+
+\subsection{Starting Values}
+
+Here we specify a function for generating starting values
+({\texttt{fun.inits()}}) and list of model structures
+({\texttt{fun.parameters.bv}}) that we would like to `monitor.' JAGS
+returns a matrix of samples from the posterior distribution for all
+variables that are monitored.
+
+%% begin.rcode, fig.width=6.5, fig.height=8.5
+%  ## variant IDs and indices
+%  variantM<-as.numeric(uvDB$variant)
+%  temp<-unique(data.frame(uvDB$variant,variantM))
+%  variant.idx<-temp[,2]
+%  names(variant.idx)<-temp[,1]
+%  variant.ids<-as.character(temp[,1])
+%  names(variant.ids)<-as.character(temp[,2])
+%  rm(temp,variantM)
+%  ## Mayo--only MAVE analysis results as starting values
+%  mayo1<-read.csv("MAVEpostProbsPt2.csv")
+%  rownames(mayo1)<-mayo1$variant
+%  head(mayo1)
+%  eta.start<-rep(-0.45,length(variant.idx))
+%  table(rownames(mayo1) %in% variant.ids)
+%  names(eta.start)<-variant.ids
+%  eta.start[rownames(mayo1)]<-mayo1$eta
+%  beta.start<-rnorm(num.b,0,0.01)
+%  ## hist(beta.start)
+%  del.start<-1+(eta.start<(-0.5))
+%  del.start[!is.na(del.known)]<-NA
+%  ## Parameters to Monitor
+%  fun.parameters.bv <- c("del" , 
+%                         "prob", "P", 
+%                         "beta", "mu.beta",
+%                         "sigma2.beta","gamma","mu.gamma","sigma2.gamma",
+%                         "eta","sigma2.eta","sigma2.reps") 
+%  ## Function that sets initial values:
+%  fun.inits <- function(x=bv.leave.off.old) {
+%      temp<-numeric(length(known.ids))
+%      names(temp)<-known.ids
+%      temp[known.ids %in% kdel]<-2
+%      temp[known.ids %in% kneut]<-1
+%      return(list(sigma.reps=rep(0.01,2),
+%                  beta=beta.start,
+%                  sigma.beta=rep(1.45,2),
+%                  sigma.eta=c(0.50,0.50),
+%                  eta=eta.start,sigma.gamma=rep(0.05,2),
+%                  mu.gamma=c(0.0,0.158),
+%                  gamma=exp(rnorm(num.b,mean=0,sd=0.01)),
+%                  mu.beta=c(0.0,-0.03),
+%                  del=del.start))
+%  }
+%% end.rcode
+
+\subsection{Model Specification}
+
+The MAVE VarCall model is specified in the external file {\texttt{maveModel.R}}:
+
+%% begin.rcode
+%  fun.model.file <- "TwoStudyMaveModel.R"
+%% end.rcode
+
+\subsection{Fit Model}
+
+Fit the model using MCMC.  {\textbf{NOTE: this code chunk may take hours to run
+on a fast numerical server.}}
+
+%% begin.rcode, mdlFit-cache, cache=TRUE, cache.lazy=FALSE
+%  jags.out<-jags(data=bdat,   
+%                 inits=fun.inits,  
+%                 parameters=fun.parameters.bv,
+%                 fun.model.file,
+%                 n.chains=1, 
+%                 n.iter=mcmc.pars$iter,
+%                 n.burnin=mcmc.pars$burn,
+%                 n.thin=mcmc.pars$thin,
+%                 DIC=F,progress.bar="none")
+%% end.rcode
+
+\subsection{Model Summaries}
+
+The matrix of sampled model parameter values is in the structure
+{\texttt{jags.out$BUGSoutput$sims.matrix}}.  In the following code
+chunk, we extract from this matrix blocks of key parameter values.
+For example, as its name suggests, {\texttt{eta.samps}} contains
+samples form the posterior distribution (rows) of the variant effect
+(eta) values for each of the variants (columns).
+
+%% begin.rcode, fig.width=3.5, fig.height=4.0
+% dim(jags.out$BUGSoutput$sims.matrix)
+% mpars1<-colnames(jags.out$BUGSoutput$sims.matrix)[substr(colnames(jags.out$BUGSoutput$sims.matrix),1,3)=="mu."]
+% mu.samps<-jags.out$BUGSoutput$sims.matrix[,mpars1]
+% mu.samps<-cbind(rep(bdat$alpha[1],nrow(mu.samps)),
+%                 rep(bdat$alpha[2],nrow(mu.samps)),
+%                 mu.samps)
+% colnames(mu.samps)[1:2]<-c("alpha[1]","alpha[2]")
+% rm(mpars1)
+% var.samps<-jags.out$BUGSoutput$sims.matrix[,(substr(colnames(jags.out$BUGSoutput$sims.matrix),1,5)=="sigma")]
+% beta.samps<-jags.out$BUGSoutput$sims.matrix[,paste("beta[",1:bdat$B,"]",sep="")]
+% gamma.samps<-jags.out$BUGSoutput$sims.matrix[,paste("gamma[",1:bdat$B,"]",sep="")]
+% eta.samps<-jags.out$BUGSoutput$sims.matrix[,paste("eta[",1:bdat$V,"]",sep="")]
+% del.samps<-jags.out$BUGSoutput$sims.matrix[,paste("del[",1:bdat$V,"]",sep="")]
+% colnames(eta.samps)<-v.ids
+% colnames(del.samps)<-v.ids
+%% end.rcode
+
+The following code chunk we compute Rao--Blackwellized (RB) estimates of
+the posterior probabilities that each variant is pathogenic.
+
+%% begin.rcode, prdv-cache, cache=TRUE, cache.lazy=FALSE
+% lpp.threshold<-100    
+% subst<-(!(colnames(del.samps)%in%known.ids))
+% prdv.samps<-fdv(eta.samps,m.s=mu.samps,
+%                 v.s=var.samps,lpp.cap=lpp.threshold,
+%                 prior.aa=beta.a,prior.bb=beta.b) ##mean=0.20, ESS = 10
+% names(prdv.samps)
+% names(prdv.samps$prdv)<-colnames(eta.samps)
+% names(prdv.samps$lPostOdds)<-colnames(eta.samps) 
+% names(prdv.samps$lBF)<-colnames(eta.samps)       
+%% end.rcode
+
+Here we compare the RB estimates to the Monte Carlo averages of the
+binary variant--specific pathogenicity indicator variables (these two
+sets of estimates should be very highly correlated):
+
+%% begin.rcode, fig.width=3.5, fig.height=4.0
+% subst<-(!(colnames(del.samps)%in%known.ids))
+% del.hat<-(apply(del.samps,2,mean) - 1)
+% cor(prdv.samps$prdv[subst],del.hat[subst])
+% plot(prdv.samps$prdv[subst],del.hat[subst],
+%      xlab="RB Estimates",ylab="MC Estimates",las=1)
+% abline(a=0,b=1,col=4,lwd=2)
+%% end.rcode
+
+Plot histograms of the variant effects estimates (eta's) and the
+estimated posterior probabilities of pathogenicity:
+
+%% begin.rcode, fig.width=6.5, fig.height=7.0
+% eta.hat<-(apply(eta.samps,2,mean))
+% eta.ll<-(apply(eta.samps,2,quantile,probs=0.025))
+% eta.ul<-(apply(eta.samps,2,quantile,probs=0.975))
+% hist(del.hat,nclass=100,main="Estimated Pr(Path|Variant,Data)")
+% hist(eta.hat,nclass=100,main="Estimated Variant Effects")
+%% end.rcode
+
+Check the observed distribution of the posterior expected standardized
+measurement model residuals.  The model assumes a five degree of
+freedom Student's t--distribution.  We provide QQ plots here for that
+specification and three others:
+
+%% begin.rcode, fig.width=6.5, fig.height=8.5
+% mm.batch<-model.matrix(~-1+as.factor(bdat$batchM))
+% mm.var<-model.matrix(~-1+as.factor(bdat$variantM))
+% mm.study<-model.matrix(~-1+as.factor(bdat$study))
+% dim(mm.batch)
+% dim(mm.var)
+% dim(mm.study)
+% dim(eta.samps)
+% dim(beta.samps)
+% errorVar.samps<-jags.out$BUGSoutput$sims.matrix[,c("sigma2.reps[1]","sigma2.reps[2]")]
+% dim(errorVar.samps)
+% errorVar<-errorVar.samps%*%t(mm.study)
+% dim(errorVar)
+% lin.pred<-((gamma.samps%*%t(mm.batch))*(eta.samps%*%t(mm.var)))+(beta.samps%*%t(mm.batch))
+% dim(lin.pred)
+% lin.pred.v <- ((gamma.samps^2)%*%t(mm.batch))*errorVar
+% ##lin.pred.v <- sweep(((gamma.samps^2)%*%t(mm.batch)),MARGIN=1,STATS=errorVar,FUN="*")
+% lin.pred.sd<-sqrt(lin.pred.v)
+% rm(lin.pred.v,mm.batch,mm.var)
+% summary(as.numeric(apply(lin.pred.sd,2,mean)))
+% expected.resids<-sweep(-lin.pred,MARGIN=2,STATS=bdat$f.bv,FUN="+")
+% expected.resids<-apply(expected.resids,2,mean)
+% lin.pred.sd<-apply(lin.pred.sd,2,mean)
+% expected.stresids<-(expected.resids/lin.pred.sd)
+% order.er<-order(expected.stresids)
+% summary(expected.resids)
+% lin.pred<-apply(lin.pred,2,mean)
+% summary(lin.pred)
+% par(mfrow=c(2,2))
+% qqplot2(x=expected.stresids,tdf=101) ##normal qqplot w/ error bars
+% qqplot2(x=expected.stresids,tdf=25) ##t-25 qqplot w/ error bars
+% qqplot2(x=expected.stresids,tdf=10) ##t-10 qqplot w/ error bars
+% qqplot2(x=expected.stresids,tdf=5) ##t-5 qqplot w/ error bars
+%% end.rcode
+
+Here is large rendering of the five degree of freedom QQ plot:
+
+%% begin.rcode, fig.width=6.5, fig.height=8.5
+% qqplot2(x=expected.stresids,tdf=5,
+%         titl="Expected Standardized Residuals 5 df T Model")
+%% end.rcode
+
+
+Batch mean (beta's) and variant effect (eta's) normal QQ plots (note
+the beta's are {\textit{not}} centered at zero):
+
+%% begin.rcode, fig.width=7.5, fig.height=3.5
+% ## Batch and Variant QQ plots.
+% par(mfrow=c(1,2))
+% ## (1) batch effects
+% expected.batch.effects<-apply(beta.samps,2,mean)
+% sd.batch.effects<-apply(beta.samps,2,sd)
+% qqnorm(expected.batch.effects,main="Normal QQ Plot of Posterior Expected Batch Effects",las=1,cex.main=0.65) 
+% abline(a=0,b=sd(expected.batch.effects))
+% ## (2) variant effects, need to subtact mixture means, ie calc residuals:
+% eta.mean<-sweep(1*(del.samps==1),1,STATS=mu.samps[,"alpha[1]"],FUN="*")+sweep(1*(del.samps==2),1,STATS=mu.samps[,"alpha[2]"],FUN="*")
+% eta.var<-sweep(1*(del.samps==1),1,STATS=var.samps[,"sigma2.eta[1]"],FUN="*")+sweep(1*(del.samps==2),1,STATS=var.samps[,"sigma2.eta[2]"],FUN="*")
+% eta.resids<-(eta.samps-eta.mean)/sqrt(eta.var)
+% expected.eta.resids<-apply(eta.resids,2,mean)
+% qqnorm(expected.eta.resids,main="Normal QQ Plot of Posterior Expected Variant Innovations",las=1,cex.main=0.65)
+% abline(a=0,b=sd(expected.eta.resids))
+%% end.rcode
+
+Boxplots of the batch mean (beta's) and scale (gamma's) random effects
+distributions:
+
+%% begin.rcode, fig.width=6.5, fig.height=8.0
+% batch.dm<-data.frame(batch=rep(1:ncol(beta.samps),each=nrow(beta.samps)),
+%                      beta=matrix(beta.samps,ncol=1,byrow=F))
+% par(mfrow=c(2,1))
+% boxplot(beta~batch,data=batch.dm,las=2,cex.axis=0.60,outline=F,
+%         pars=list(boxwex=0.6,crt=90),
+%         main="Posterior distribution of Batch Offset Parameters",
+%         ylab="Batch Offset",xlab="Batch Number",cex.main=0.75)
+% abline(h=0,lwd=2,col=2)
+% abline(v=48.5,lwd=2,lty=2,col=2)
+% gamma.dm<-data.frame(batch=rep(1:ncol(gamma.samps),each=nrow(gamma.samps)),
+%                      gamma=matrix(gamma.samps,ncol=1,byrow=F))
+% boxplot(gamma~batch,data=gamma.dm,las=2,cex.axis=0.60,outline=F,
+%         pars=list(boxwex=0.6,crt=90),
+%         main="Posterior distribution of Batch Scale Parameters",
+%         ylab="Batch Scale",xlab="Batch Number",cex.main=0.75)
+% abline(h=1,lwd=2,col=2)
+% abline(v=48.5,lwd=2,lty=2,col=2)
+%% end.rcode
+
+A scatter plot of posterior mean batch means vers batch scalings:
+
+%% begin.rcode, fig.width=3.5, fig.height=4.0
+% plot(apply(beta.samps,2,mean),apply(gamma.samps,2,mean),las=1,
+%      xlab="Batch Offset",ylab="Batch Scale")
+%% end.rcode
+
+\subsection{Graphical Summaries of Parameter Estimates}
+
+Histograms of the marginal posterior distributions of the variance
+components: the measurment error squared scale parameter
+{\texttt{sigma2.reps}}, the variance of the batch mean random effects
+{\texttt{sigma2.beta}} and the variance of the logged batch scale
+random effects {\texttt{sigma2.gamma}}.
+
+%% begin.rcode, fig.width=7.5, fig.height=8.5
+% par(mfrow=c(3,2))
+% ## sigma2.reps
+% hist(sqrt(jags.out$BUGSoutput$sims.matrix[,"sigma2.reps[1]"]),cex.main=0.65,
+%      prob=T,nclass=50,xlab="sigma2.reps[1]",main="Prior versus Posterior -- sigma2.reps[1]")
+% lines(grid<-seq(0,max(sqrt(jags.out$BUGSoutput$sims.matrix[,"sigma2.reps[1]"])),by=0.01),
+%       2*dt(grid,df=1),col=3,lwd=2)
+% hist(sqrt(jags.out$BUGSoutput$sims.matrix[,"sigma2.reps[2]"]),cex.main=0.65,
+%      prob=T,nclass=50,xlab="sigma2.reps[2]",main="Prior versus Posterior -- sigma2.reps[2]")
+% lines(grid<-seq(0,max(sqrt(jags.out$BUGSoutput$sims.matrix[,"sigma2.reps[2]"])),by=0.01),
+%       2*dt(grid,df=1),col=3,lwd=2)
+% ## sigma2.beta
+% hist(sqrt(jags.out$BUGSoutput$sims.matrix[,"sigma2.beta[1]"]),cex.main=0.65,
+%      prob=T,nclass=50,xlab="sigma2.beta[1]",main="Prior versus Posterior -- sigma2.beta[1]")
+% lines(grid<-seq(0,max(sqrt(jags.out$BUGSoutput$sims.matrix[,"sigma2.beta[1]"])),by=0.01),
+%       2*dt(grid,df=1),col=3,lwd=2)
+% hist(sqrt(jags.out$BUGSoutput$sims.matrix[,"sigma2.beta[2]"]),cex.main=0.65,
+%      prob=T,nclass=50,xlab="sigma2.beta[2]",main="Prior versus Posterior -- sigma2.beta[2]")
+% lines(grid<-seq(0,max(sqrt(jags.out$BUGSoutput$sims.matrix[,"sigma2.beta[2]"])),by=0.01),
+%       2*dt(grid,df=1),col=3,lwd=2)
+% ## sigma2.gamma
+% hist(sqrt(jags.out$BUGSoutput$sims.matrix[,"sigma2.gamma[1]"]),cex.main=0.65,
+%      prob=T,nclass=50,xlab="sigma^2_gamma[1]",main="Prior versus Posterior -- sigma2.gamma[1]")
+% lines(grid<-seq(0,max(sqrt(jags.out$BUGSoutput$sims.matrix[,"sigma2.gamma[1]"])),by=0.01),
+%       2*dt(grid,df=1),col=3,lwd=2)
+% hist(sqrt(jags.out$BUGSoutput$sims.matrix[,"sigma2.gamma[2]"]),cex.main=0.65,
+%      prob=T,nclass=50,xlab="sigma^2_gamma[2]",main="Prior versus Posterior -- sigma2.gamma[2]")
+% lines(grid<-seq(0,max(sqrt(jags.out$BUGSoutput$sims.matrix[,"sigma2.gamma[2]"])),by=0.01),
+%       2*dt(grid,df=1),col=3,lwd=2)
+%% end.rcode
+
+Histograms of the marginal posterior distributions of the
+component--wise variances (they are constrained to be equal) for the
+two--component normal mixture model for the variant effects (eta's).
+
+%% begin.rcode, fig.width=7.5, fig.height=4.5
+% par(mfrow=c(1,2))
+% ## sigma2.eta[1]
+% hist(sqrt(jags.out$BUGSoutput$sims.matrix[,"sigma2.eta[1]"]),cex.main=0.65,
+%      prob=T,nclass=50,xlab="sigma.eta[1]",main="Prior versus Posterior -- sigma.eta[1]")
+% lines(grid<-seq(0,max(sqrt(jags.out$BUGSoutput$sims.matrix[,"sigma2.eta[1]"])),by=0.01),
+%       2*dt(grid,df=1),col=3,lwd=2)
+% ## sigma2.eta[2]
+% hist(sqrt(jags.out$BUGSoutput$sims.matrix[,"sigma2.eta[2]"]),cex.main=0.65,
+%      prob=T,nclass=50,xlab="sigma.eta[2] == sigma.eta[1]",
+%      main="Prior versus Posterior -- sigma_eta[2]==sigma_eta[1]")
+% lines(grid<-seq(0,max(sqrt(jags.out$BUGSoutput$sims.matrix[,"sigma2.eta[2]"])),by=0.01),
+%       2*dt(grid,df=1),col=3,lwd=2)
+%% end.rcode
+
+Histograms of the marginal posterior distributions of the mean of the
+batch mean parameters (\texttt{mu.beta}) and the mean of the logged
+batch scale parameters ({\texttt{mu.gamma}}).
+
+%% begin.rcode, fig.width=7.5, fig.height=4.5
+% ##Mean parameters:
+% par(mfrow=c(2,2))
+% ## mu.beta
+% hist(jags.out$BUGSoutput$sims.matrix[,"mu.beta[1]"],cex.main=0.85,
+%      prob=T,nclass=50,xlab="mu.beta[1]",
+%      main="Prior versus Posterior -- mu.beta[1]")
+% abline(h=(1/20),col=3,lwd=2)
+% hist(jags.out$BUGSoutput$sims.matrix[,"mu.beta[2]"],cex.main=0.85,
+%      prob=T,nclass=50,xlab="mu.beta[2]",
+%      main="Prior versus Posterior -- mu.beta[2]")
+% abline(h=(1/20),col=3,lwd=2)
+% ## mu.gamma
+% hist(jags.out$BUGSoutput$sims.matrix[,"mu.gamma[1]"],cex.main=0.85,
+%      prob=T,nclass=50,xlab="mu.gamma[1]",
+%      main="Prior versus Posterior -- mu.gamma[1]")
+% lines(grid<-seq(min(jags.out$BUGSoutput$sims.matrix[,"mu.gamma[1]"]),
+%                 max(jags.out$BUGSoutput$sims.matrix[,"mu.gamma[1]"]),by=0.01),
+%      2*dnorm(grid,mean=0,sd=1),col=3,lwd=2)
+% hist(jags.out$BUGSoutput$sims.matrix[,"mu.gamma[2]"],cex.main=0.85,
+%      prob=T,nclass=50,xlab="mu.gamma[2]",
+%      main="Prior versus Posterior -- mu.gamma[2]")
+% lines(grid<-seq(min(jags.out$BUGSoutput$sims.matrix[,"mu.gamma[2]"]),
+%                 max(jags.out$BUGSoutput$sims.matrix[,"mu.gamma[2]"]),by=0.01),
+%      2*dnorm(grid,mean=0,sd=1),col=3,lwd=2)
+%% end.rcode
+
+\subsection{Table of Estimated Variant Effects}
+
+Basic annotation structure:
+
+%% begin.rcode, fig.width=7.5, fig.height=4.5
+%  annot<-uvDB[,c("variant","Exon","p.b")]
+%  annot$Exon<-as.character(annot$Exon)
+%  annot$Exon<-substr(annot$Exon,1,2)
+%  annot<-unique(annot)
+%  dim(annot)
+%% end.rcode
+
+Assemble a table of variant--level results for export:
+
+%% begin.rcode, fig.width=7.5, fig.height=8.5
+% pr.del<-prdv.samps$prdv
+% length(pr.del)
+% pr.del[1:3]
+% tabl<-annot
+% dim(tabl)
+% length(unique(tabl$variant))
+% rownames(tabl)<-tabl$variant
+% tabl<-data.frame(tabl)
+% tabl$PrDel<-rep(NA,nrow(tabl))
+% table(names(pr.del) %in% rownames(tabl))
+% tabl[names(pr.del),"PrDel"]<-pr.del
+% table(tabl$P_B[is.na(tabl$PrDel)])
+% table(tabl$P_B[!is.na(tabl$PrDel)])
+% lp.odds<-prdv.samps$lPostOdds
+% tabl$lPostOdds<-rep(NA,nrow(tabl))
+% table(names(lp.odds) %in% rownames(tabl))
+% tabl[names(lp.odds),"lPostOdds"]<-lp.odds
+% lbf<-prdv.samps$lBF
+% tabl$logBF<-rep(NA,nrow(tabl))
+% table(names(lbf) %in% rownames(tabl))
+% tabl[names(lbf),"logBF"]<-lbf
+% tabl$Status<-rep("VUS",nrow(tabl))
+% tabl$Status[rownames(tabl)%in%kdel]<-"Path"
+% tabl$Status[rownames(tabl)%in%kneut]<-"Neut"
+% table(tabl$Status)
+% temp<-apply(eta.samps,2,mean,na.rm=TRUE)
+% temp<-temp[rownames(tabl)]
+% table(names(temp) == rownames(tabl))
+% tabl$eta <- temp; rm(temp)
+% eta.ll<-(apply(eta.samps,2,quantile,probs=0.025))
+% eta.ul<-(apply(eta.samps,2,quantile,probs=0.975))
+% tabl$eta.ll<-rep(NA,nrow(tabl))
+% tabl[names(eta.ll),"eta.ll"]<-eta.ll
+% tabl$eta.ul<-rep(NA,nrow(tabl))
+% tabl[names(eta.ul),"eta.ul"]<-eta.ul
+%% end.rcode
+
+Incorporate results from Mayo--only analysis:
+
+%% begin.rcode, fig.width=7.5, fig.height=8.5
+%  mayo1<-read.csv("MAVEpostProbsPt2.csv")
+%  rownames(mayo1)<-mayo1$variant
+%  head(mayo1)
+%  table(rownames(mayo1) %in% rownames(tabl))
+%  tabl$mayo.PrDel<-rep(NA,nrow(tabl))
+%  tabl[rownames(mayo1),"mayo.PrDel"]<-mayo1$PrDel
+%  tabl$mayo.lPO<-rep(NA,nrow(tabl))
+%  tabl[rownames(mayo1),"mayo.lPO"]<-mayo1$lPostOdds
+%  tabl$mayo.lBF<-rep(NA,nrow(tabl))
+%  tabl[rownames(mayo1),"mayo.lBF"]<-mayo1$logBF
+%  tabl$mayo.eta<-rep(NA,nrow(tabl))
+%  tabl[rownames(mayo1),"mayo.eta"]<-mayo1$eta
+%% end.rcode
+
+\section{Plots of Supplemental Materials}
+
+These are individual plots for use in the supplement:
+
+%% begin.rcode
+%  pdf("ResidualQQ.pdf",width=8,height=8)
+%  qqplot2(x=expected.stresids,tdf=5,
+%          titl="Expected Standardized Residuals 5 df T Model")
+%  dev.off()
+%  
+%  pdf("PrDelHistogram.pdf",width=8,height=8)
+%  hist(del.hat,nclass=100,
+%       main="Estimated Pr(Path | Variant, Data)\n All Assayed Variants",
+%       las=1)
+%  dev.off()
+%  
+%  pdf("EtaHistogram.pdf",width=8,height=6)
+%  hist(eta.hat,nclass=100,cex.main=1.4,
+%       main="Estimated Variant Effects (Eta's)\n All Assayed Variants",
+%       las=1)
+%  dev.off()
+%  
+%  pdf("BatchMeanQQ.pdf",width=8,height=8)
+%  qqplot2(expected.batch.effects,tdf=1000,
+%         titl="Normal QQ Plot of Posterior Expected Batch Mean Effects")
+%  dev.off()
+%  
+%  batch.scale.effects<-log(apply(gamma.samps,2,mean))
+%  pdf("BatchScaleQQ.pdf",width=8,height=8)
+%  qqplot2(batch.scale.effects,tdf=1000,
+%         titl="Normal QQ Plot of Posterior Logged Expected Scale Effects")
+%  dev.off()
+%  
+%  pdf("VariantQQ.pdf",width=8,height=8)
+%  qqplot2(expected.eta.resids,tdf=1000,
+%          titl="Normal QQ Plot of Posterior Expected Mean--Adjusted Variant Innovations")
+%  dev.off()
+%  
+%  pdf("BatchMeanBPlot.pdf",width=10,height=6)
+%  boxplot(beta~batch,data=batch.dm,las=2,outline=F,
+%           pars=list(boxwex=0.6,crt=90),
+%          main="Posterior distribution of Batch Mean Parameters `Beta'",
+%          ylab="Batch Mean",xlab="Batch Number",cex.main=1.5)
+%  abline(h=0,lwd=2,col=2)
+%  abline(v=48.5,lwd=2,lty=2,col=2)
+%  dev.off()
+%  
+%  pdf("BatchScaleBPlot.pdf",width=10,height=6)
+%  boxplot(gamma~batch,data=gamma.dm,las=2,cex.axis=0.60,outline=F,
+%          pars=list(boxwex=0.6,crt=90),
+%          main="Posterior distribution of Batch Scale Parameters `Gamma'",
+%          ylab="Batch Scale",xlab="Batch Number",cex.main=1.5)
+%  abline(h=1,lwd=2,col=2)
+%  abline(v=48.5,lwd=2,lty=2,col=2)
+%  dev.off()
+%  
+%  pdf("BatchLocationVsScale.pdf",width=8,height=8)
+%  plot(apply(beta.samps,2,mean),apply(gamma.samps,2,mean),las=1,
+%       main="Scatter Plot of Batch Mean Versus Scale Adjustments",
+%       xlab="Batch Mean",ylab="Batch Scale",pch=16)
+%  dev.off()
+%% end.rcode
+
+%% begin.rcode, fig.width=7.5, fig.height=8.5
+%  plot(tabl$mayo.lPO,tabl$lPostOdds,las=1,pch=16,cex=0.5,
+%       xlab="log Posterior Odds Mayo Study",
+%       ylab="log Posterior Odds Mayo + NCI",
+%       main="log Posterior Odds Estimates Mayo-Only vs Mayo+NCI")
+%  abline(a=0,b=1,lwd=2,col=2)
+%  abline(h=0,col=1,lwd=1,lty=3)
+%  abline(v=0,col=1,lwd=1,lty=3)
+%  hist(tabl$lPostOdds,nclass=200,las=1,
+%       main="Histogram of log Posterior Odds Estimates")
+%  plot(tabl$mayo.eta,tabl$eta,las=1,pch=16,cex=0.5,
+%       xlab="Mayo Study etas",ylab="Two Study etas",
+%       main="Mayo versus Two Study etas")
+%  abline(a=0,b=1,lwd=2,col=2)
+%% end.rcode
+
+
+Variants that shift from low to high or high to low PrDel:
+
+%% begin.rcode, fig.width=7.5, fig.height=8.5
+%  delta1<-tabl[(!is.na(tabl$mayo.PrDel))&(!is.na(tabl$PrDel))&(tabl$mayo.PrDel>0.95)&(tabl$PrDel<0.05),]
+%  delta2<-tabl[(!is.na(tabl$mayo.PrDel))&(!is.na(tabl$PrDel))&(tabl$mayo.PrDel<0.05)&(tabl$PrDel>0.95),]
+%  var1<-as.character(delta1$variant)
+%  var2<-as.character(delta2$variant)
+%  tabl[var1,]
+%  tabl[var2,]
+%  tbl<-table(uvDB$variant,uvDB$replicate)
+%  tbl[var1,]
+%  tbl[var2,]
+%% end.rcode
+
+%% begin.rcode, fig.width=7.5, fig.height=8.5
+%  plot(tabl$mayo.lPO,tabl$lPostOdds,las=1,pch=16,cex=0.5,
+%       xlab="log Posterior Odds Mayo Study",
+%       ylab="log Posterior Odds Mayo + NCI",
+%       main="log Posterior Odds Estimates Mayo-Only vs Mayo+NCI")
+%  abline(a=0,b=1,lwd=2,col=2)
+%  abline(h=0,col=1,lwd=1,lty=3)
+%  abline(v=0,col=1,lwd=1,lty=3)
+%  points(tabl[var1,"mayo.lPO"],tabl[var1,"lPostOdds"],pch=16,col=2,cex=1.2)
+%  points(tabl[var2,"mayo.lPO"],tabl[var2,"lPostOdds"],pch=16,col=3,cex=1.2)
+%  hist(tabl$lPostOdds,nclass=200,las=1,
+%       main="Histogram of log Posterior Odds Estimates")
+%  plot(tabl$mayo.eta,tabl$eta,las=1,pch=16,cex=0.5,
+%       xlab="Mayo Study etas",ylab="Two Study etas",
+%       main="Mayo versus Two Study etas")
+%  abline(a=0,b=1,lwd=2,col=2)
+%% end.rcode
+
+%% begin.rcode, fig.width=7.5, fig.height=8.5
+%  library(mclust)
+%  keep<-(apply(is.na(tabl[,c("lPostOdds","mayo.lPO")]),1,sum)==0)
+%  mc.out2<-Mclust(tabl[keep,c("mayo.lPO","lPostOdds")],G=3,verbose=FALSE)
+%  plot(mc.out2,what="classification",cex=0.5)
+%  plot(mc.out2,what="uncertainty",cex=0.5)
+%% end.rcode
+
+\section{Compare Run1 and Run2}
+
+%% begin.rcode, fig.width=7.5, fig.height=8.5
+%  run1<-read.csv("../brca2.twoStudyRun1.mave24/MAVEpostProbs.csv")
+%  rownames(run1)<-run1$variant
+%  table(rownames(run1) == rownames(tabl))
+%  fDel<-apply(del.samps-1,2,sum)
+%  tbl <- table(fDel)
+%  tbl[1:5]
+%  pdf("lPOrun1vs2.pdf",width=12,height=12)
+%  plot(run1$lPostOdds,tabl$lPostOdds,las=1,pch=16,cex=0.25)
+%  abline(h=log(1/19999),col=2,lwd=1,lty=2)
+%  abline(v=log(1/19999),col=2,lwd=1,lty=2)
+%  abline(h=log(2/19998),col=3,lwd=1,lty=2)
+%  abline(v=log(2/19998),col=3,lwd=1,lty=2)
+%  abline(h=log(3/19997),col=4,lwd=1,lty=2)
+%  abline(v=log(3/19997),col=4,lwd=1,lty=2)
+%  abline(h=log(4/19996),col=5,lwd=1,lty=2)
+%  abline(v=log(4/19996),col=5,lwd=1,lty=2)
+%  abline(h=log(5/19995),col=6,lwd=1,lty=2)
+%  abline(v=log(5/19995),col=6,lwd=1,lty=2)
+%  table(names(fDel)==rownames(tabl))
+%  fDel<-fDel[rownames(tabl)]
+%  table(names(fDel)==rownames(tabl))
+%  for (i in 1:5){
+%      points(run1$lPostOdds[fDel==i],tabl$lPostOdds[fDel==i],col=(i+1),pch=16,cex=0.5)
+%  }
+%  legend("topleft",inset=0.05,legend=paste0("PrDel = ",1:5," in 20,000"),col=2:5,lwd=4)
+%  dev.off()
+%  ##
+%  pdf("PrDelRun1vs2.pdf",width=12,height=12)
+%  plot(run1$PrDel,tabl$PrDel,las=1,pch=16,cex=0.25)
+%  abline(h=c(0.05,0.95),lwd=1,col=2,lty=2)
+%  abline(v=c(0.05,0.95),lwd=1,col=2,lty=2)
+%  dev.off()
+%  ##
+%  reps<-table(uvDB$variant,uvDB$replicate)
+%  nrep<-apply(reps,1,sum)
+%  nrep1<-apply(reps[,1:6],1,sum)
+%  nrep2<-apply(reps[,7:8],1,sum)
+%  nrep<-nrep[rownames(tabl)]
+%  nrep1<-nrep1[rownames(tabl)]
+%  nrep2<-nrep2[rownames(tabl)]
+%  lpoCat<-(floor(tabl$lPostOdds))
+%  lpoByNrep<-table(lpoCat,nrep)
+%  temp<-apply(lpoByNrep,1,sum)
+%  lpoByNrepNorm<-sweep(lpoByNrep,MAR=1,FUN="/",STATS=temp)
+%  pdf("lPObarplots.pdf",width=10,height=12)
+%  par(mfrow=c(2,1),las=1)
+%  barplot(t(lpoByNrep),legend.text=paste0("# Reps = ",2:8),las=1,
+%          main="Number of Variants With N=n Reps as a Function of log Posterior Odds")
+%  barplot(t(lpoByNrepNorm),las=1,
+%          main="Proportion of Variants With N=n Reps as a Function of log Posterior Odds")
+%  dev.off()
+%% end.rcode
+
+\section{Combine Run1 and Run2}
+
+The following code chunk we compute Rao--Blackwellized (RB) estimates
+of the posterior probabilities that each variant is pathogenic using
+the combined samples from runs one and two.
+
+%% begin.rcode, prdv-cache2, cache=TRUE, cache.lazy=FALSE
+% load("run1.RData")
+% lpp.threshold<-100    
+% subst<-(!(colnames(del.samps)%in%known.ids))
+% prdv.combo<-fdv(rbind(eta.samps1,eta.samps),m.s=rbind(mu.samps1,mu.samps),
+%                 v.s=rbind(var.samps1,var.samps),lpp.cap=lpp.threshold,
+%                 prior.aa=beta.a,prior.bb=beta.b) ##mean=0.20, ESS = 10
+% names(prdv.combo)
+% names(prdv.combo$prdv)<-colnames(eta.samps)
+% names(prdv.combo$lPostOdds)<-colnames(eta.samps) 
+% names(prdv.combo$lBF)<-colnames(eta.samps)       
+%% end.rcode
+
+\section{Update and Output Results}
+
+%% begin.rcode
+% tabl$RelFrDel<-rep(NA,nrow(tabl))
+% tabl$RelFrDel.run1<-rep(NA,nrow(tabl))
+% tabl$RelFrDel.combo<-rep(NA,nrow(tabl))
+% tabl[names(del.hat),"RelFrDel"]<-del.hat
+% ## Add Run 1 Results:
+% tabl[names(del.hat1),"RelFrDel.run1"]<-del.hat1
+% tabl$PrDel.run1<-run1$PrDel
+% tabl$lPostOdds.run1<-run1$lPostOdds
+% tabl$lBF.run1<-run1$lBF
+% ## Add Combined Results:
+% tabl$RelFrDel.combo<-((tabl$RelFrDel.run1 + tabl$RelFrDel)/2)
+% tabl$PrDel.combo<-rep(NA,nrow(tabl))
+% table(names(prdv.combo$prdv) %in% rownames(tabl))
+% tabl[names(prdv.combo$prdv),"PrDel.combo"]<-prdv.combo$prdv
+% lp.odds<-prdv.combo$lPostOdds
+% tabl$lPostOdds.combo<-rep(NA,nrow(tabl))
+% table(names(lp.odds) %in% rownames(tabl))
+% tabl[names(lp.odds),"lPostOdds.combo"]<-lp.odds
+% lbf<-prdv.samps$lBF
+% tabl$logBF.combo<-rep(NA,nrow(tabl))
+% table(names(lbf) %in% rownames(tabl))
+% tabl[names(lbf),"logBF.combo"]<-lbf
+%% end.rcode
+
+%% begin.rcode
+%  ## Output Table of Estimates:
+%  write.table(tabl,file="MAVEpostProbs.csv",quote=FALSE,sep=",",row.names=FALSE,col.names=TRUE)
+%% end.rcode
+
+\section{Wrap--Up}
+
+%% begin.rcode, wrapup
+%  gc(); save.image()
+%% end.rcode
+
+\end{document}
+
+
+
+
+%% begin.rcode, fig.width=6.5, fig.height=8.5
+%% end.rcode
+
+
+%% begin.rcode, fig.width=7.5, fig.height=3.5
+%% end.rcode
+
+%% begin.rcode, fig.width=6.5, fig.height=8.0
+%% end.rcode
+
+%% begin.rcode, fig.width=3.5, fig.height=4.0
+%% end.rcode
+
+%% begin.rcode, fig.width=7.5, fig.height=8.5
+% par(mfrow=c(2,2))
+%% end.rcode
+
+%% begin.rcode, fig.width=7.5, fig.height=8.5
+% par(mfrow=c(2,2))
+%% end.rcode
+
+% end.rcode

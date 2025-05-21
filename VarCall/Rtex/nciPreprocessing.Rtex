@@ -1,0 +1,399 @@
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%% Analysis of BRCA2 MAVE Data.      %%
+%%  Combine NCI and Mayo Studies.    %%
+%%  NCI Data Preprocessing Steps.    %%
+%%     Annotated knitr doc           %%
+%% Last Modified  11/11/24 by ESI.   %%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\documentclass{article}
+
+%% begin.rcode setup, include=FALSE
+% opts_chunk$set(fig.path='./figs/',cache.path='./cache/',child.path='../')
+%% end.rcode
+
+\input{../preamble.tex}
+
+\title{2024 BRCA2 VuS Joint Analysis of Mayo and NCI MAVE
+  Data\\ NCI Data Preprocessing Script}
+%\author{Author1, Author2, Author3}
+\date{\today}
+\begin{document}
+\maketitle
+
+\section{High--Level User--Specified Parameters}
+
+%% begin.rcode
+%  ## Do you want a test run with a 20% Subset?
+% subst<-FALSE
+%% end.rcode
+
+\section{Start Up}
+
+Set a seed for the random number generators to ensure repeatabability
+and load necessary R libraries.
+
+%% begin.rcode
+%  ## Set Random Seed
+%  set.seed(seed=03122024)
+%  ## Load custom functions that will be used below:
+%  source("../RFuncs.R",echo=FALSE)
+%  ## Libraries:
+%  library(mgcv)
+%% end.rcode
+
+\section{Import and Process NCI Data}
+
+Read in the MAVE data and training variant labels:
+
+%% begin.rcode
+%  uvDB<-read.delim("../shyamBRCA2allCounts.txt",as.is=TRUE)
+%  dim(uvDB)
+%  if (subst==TRUE) uvDB<-uvDB[seq(1,nrow(uvDB),by=5),]
+%  dim(uvDB)
+%  head(uvDB)
+%% end.rcode
+
+\subsection{Derived Variables and DB Summaries}
+
+Add row names; change a few column names; make `Exon' a factor:
+
+%% begin.rcode
+%  uvDB$POS<-as.numeric(substr(uvDB$g_nom,16,23))
+%  summary(uvDB$POS)
+%  ## From Wenan: "Their position is 1 base pair higher than our data."
+%  uvDB$POS<-(uvDB$POS - 1)
+%  uvDB$REF<-substr(uvDB$g_nom,24,24)
+%  uvDB$ALT<-substr(uvDB$g_nom,26,26)
+%  table(uvDB$REF,useNA="always")
+%  table(uvDB$ALT,useNA="always")
+%  table(uvDB$REF,uvDB$ALT,useNA="always")
+%  ## Unique ID
+%  uvDB$uPOS<-paste0(uvDB$POS,"_",uvDB$REF,"_",uvDB$ALT)
+%  if (nrow(uvDB)==length(unique(uvDB$uPOS))) rownames(uvDB)<-uvDB$uPOS
+%  uvDB$Exon<-factor(uvDB$Exon)
+%  table(uvDB$Experiment,useNA="always")
+%  table(uvDB$Exon)
+%  tbl<-table(uvDB$POS,uvDB$Experiment)
+%  table(as.numeric(tbl)) ## number of variants seen at a position
+%  table(tbl<-apply(tbl>0,1,sum)) ## most positions appear in a unique experiment:
+%  names(tbl[tbl>1])  ## these are the postions that appear in two
+%  ## Labeled Variants:
+%  ## use StopGain vs Synonymous for Training labels:
+%  newTrainingLabel<-read.csv("../variant_type_for_train.csv")
+%  kdel<-unique(newTrainingLabel$uPOS[newTrainingLabel$EventType=="StopGain"])
+%  kneut<-unique(newTrainingLabel$uPOS[newTrainingLabel$EventType=="Synonymous"])
+%  uvDB$label<-rep(NA,nrow(uvDB))
+%  uvDB$label[uvDB$uPOS %in% kdel]<-"P"
+%  uvDB$label[uvDB$uPOS %in% kneut]<-"B"
+%  table(uvDB$label,useNA="always")
+%% end.rcode
+
+\subsection{Compute Offsets and Other Summaries for Counts Data}
+
+\textbf{First:} Identify and set to NA zero and low count (<20)
+denominator (day 3) counts; set to 1 zero numerator (day 14) counts.
+
+%% begin.rcode
+%  summary(uvDB$D3_counts_RP1)
+%  table(uvDB$D3_counts_RP1<20)
+%  summary(uvDB$D3_counts_RP2)
+%  table(uvDB$D3_counts_RP2<20)
+%  summary(uvDB$DMSO_D14_counts_RP1)
+%  summary(uvDB$DMSO_D14_counts_RP2)
+%  table(uvDB$DMSO_D14_counts_RP1==0)
+%  table(uvDB$DMSO_D14_counts_RP2==10)
+%  uvDB$D3_counts_RP1[uvDB$D3_counts_RP1<20]<-NA
+%  uvDB$D3_counts_RP2[uvDB$D3_counts_RP2<20]<-NA
+%  uvDB$DMSO_D14_counts_RP1[uvDB$DMSO_D14_counts_RP1==0]<-1
+%  uvDB$DMSO_D14_counts_RP2[uvDB$DMSO_D14_counts_RP2==0]<-1
+%% end.rcode
+
+\textbf{Second:} Compute count totals for all observed combintations
+of day, exon and replicate (labeled `offsets' in the code below), then
+use these to compute raw abundance rates (denoted $A_{v,r,d}$ in the
+Supplement). Use the abundance rates to compute day 14 to day 5
+(here=3) rate ratios (denoted $R_{v,r}^{14:5}$ in the Supplement).
+Add columns containing the `offsets' and the rate ratios to the
+working data base {\texttt{uvDB}}.  Finally, compute an
+Experiment--specific standardized position variable {\texttt{PosStd}}
+and add it to the working data base.
+
+%% begin.rcode
+%   ## `day 5' is populated w/ `day 3' NCI data.
+%   day5<-c("D3_counts_RP1","D3_counts_RP2")
+%   day14<-c("DMSO_D14_counts_RP1","DMSO_D14_counts_RP2")
+%   offset5<-matrix(NA,nrow(uvDB),length(day5))
+%   colnames(offset5)<-cnOffset5<-paste0("R",1:2,"offsetD5")
+%   offset14<-matrix(NA,nrow(uvDB),length(day14))
+%   colnames(offset14)<-cnOffset14<-paste0("R",1:2,"offsetD14")
+%   for (i in 1:length(day5)){
+%       temp5<-lapply(split(uvDB[,day5[i]],uvDB$Experiment),sum,na.rm=TRUE)
+%       temp14<-lapply(split(uvDB[,day14[i]],uvDB$Experiment),sum,na.rm=TRUE)
+%       offset5[,i]<-as.numeric(temp5[uvDB$Experiment])
+%       offset14[,i]<-as.numeric(temp14[uvDB$Experiment])
+%   }
+%   raw5<-(uvDB[,day5]/offset5)        ## day 5 abundance rates
+%   raw14<-(uvDB[,day14]/offset14)     ## day 14 abundance rates
+%   raw<-(raw14/raw5)                  ## day 14 to day 5 rate ratio
+%   colnames(raw)<-paste0("R",1:2,"_raw")
+%   colnames(raw5)<-paste0("R",1:2,"_freqD5")
+%   colnames(raw14)<-paste0("R",1:2,"_freqD14")
+%   uvDB<-cbind(uvDB,offset5,offset14,raw,raw5,raw14)
+%   rm(offset5,offset14,raw,raw5,raw14)
+%   pos.min<-lapply(split(uvDB[,"POS"],uvDB$Experiment),min,na.rm=TRUE)
+%   pos.max<-lapply(split(uvDB[,"POS"],uvDB$Experiment),max,na.rm=TRUE)
+%   pos.range<- as.numeric(pos.max) - as.numeric(pos.min)
+%   names(pos.range)<-names(pos.min)
+%   uvDB$PosMin<-as.numeric(pos.min[uvDB$Experiment])
+%   uvDB$PosMax<-as.numeric(pos.max[uvDB$Experiment])
+%   uvDB$PosRange<-as.numeric(pos.range[uvDB$Experiment])
+%   uvDB$PosStd<-((uvDB$POS - uvDB$PosMin)/(uvDB$PosMax - uvDB$PosMin))
+%   summary(uvDB$PosStd)
+%% end.rcode
+
+\newpage
+\section{Exploratory Data Analysis}
+
+\subsection{Graphical Summaries of Estimated Ratios}
+
+%% begin.rcode, fig.width=6.0, fig.height=6.5
+% par(mfrow=c(2,2),las=1)
+%  qqnorm(log(uvDB$R1_raw),main="log Ratio, Normal QQ Plot\n Replicate 1")
+%  qqnorm(log(uvDB$R2_raw),main="log Ratio, Normal QQ Plot\n Replicate 2")
+%  uvDB$meanRatio<-((uvDB$R1_raw + uvDB$R2_raw)/2)
+%  qqnorm(log(uvDB$meanRatio),main="log Averaged Ratio QQ Plot")
+%  hist(log(uvDB$meanRatio),nclass=100,main="log Averaged Ratio")
+%% end.rcode
+
+\subsection{Tabular Summaries}
+
+Cross--tabulations of several design and annotation variables:
+
+%% begin.rcode
+%  table(uvDB$Exon,uvDB$Outcome,useNA="always")
+%  table(uvDB$Exon,uvDB$label,useNA="always")
+%  table(uvDB$label,uvDB$Outcome)
+%% end.rcode
+
+\newpage
+\subsection{Graphical Summaries of Labeled Data}
+
+Histograms of: (1) the replicate 1 day 14 to day 5 rate ratio, (2) the
+median day 14 to day 5 rate ratio across replicates and (3) the median
+day 14 to day 0 (not yet positionally normalized) rate ratio.
+
+%% begin.rcode, fig.width=7.5, fig.height=9.5
+%  par(mfrow=c(3,1))
+%  plot(c(0,2.5),c(0,2.5),las=1,xlab="R1_Ratio",ylab="Probability",type="n",
+%      ,main="Histogram of Labelled Rep1 D14/D5 Ratios by Class")
+%  hist((uvDB$R1_raw[(!is.na(uvDB$label))&(uvDB$label=="B")]),
+%       col=3,prob=TRUE,nclass=30,add=TRUE)
+%  hist((uvDB$R1_raw[(!is.na(uvDB$label))&(uvDB$label=="P")]),
+%       col=2,prob=TRUE,nclass=30,add=TRUE)
+%  legend("topright",inset=0.05,legend=c("Benign","Pathogenic"),
+%         col=c(3,2),lwd=5)
+%  plot(c(0,2.5),c(0,2.5),las=1,xlab="R2_Ratio",ylab="Probability",type="n",
+%      ,main="Histogram of Labelled Rep2 D14/D5 Ratios by Class")
+%  hist((uvDB$R2_raw[(!is.na(uvDB$label))&(uvDB$label=="B")]),
+%       col=3,prob=TRUE,nclass=30,add=TRUE)
+%  hist((uvDB$R2_raw[(!is.na(uvDB$label))&(uvDB$label=="P")]),
+%       col=2,prob=TRUE,nclass=30,add=TRUE)
+%  legend("topright",inset=0.05,legend=c("Benign","Pathogenic"),
+%         col=c(3,2),lwd=5)
+%  ## Median(=mean) of Raw D14/D3 Ratios:
+%  plot(c(0,2.5),c(0,2.5),las=1,xlab="Mean Ratio",ylab="Probability",type="n",
+%      ,main="Histogram of Labeled Mean D14/D3 Ratios by Class")
+%  hist((uvDB$meanRatio[(!is.na(uvDB$label))&(uvDB$label=="B")]),
+%       col=3,prob=TRUE,nclass=30,add=TRUE)
+%  hist((uvDB$meanRatio[(!is.na(uvDB$label))&(uvDB$label=="P")]),
+%       col=2,prob=TRUE,nclass=30,add=TRUE)
+%  legend("topright",inset=0.05,legend=c("Benign","Pathogenic"),
+%         col=c(3,2),lwd=5)
+%% end.rcode
+
+\newpage
+\section{Create `Tall' Data Structure}
+
+Here we create a stacked data structure with day-- and
+replicate--specific measurments in different rows and the variant
+counts and batch totals (`offsets') each in their own column.  This
+format is needed for modeling.  Save the old {\texttt{uvDB}} as
+{\texttt{uvMaster}} and save the stacked data structure as the new
+{\texttt{uvDB}}. Convert categorical variables from character to
+factor types.
+
+%% begin.rcode
+%  uvMaster<-uvDB
+%  uvDB$P_B<-uvDB$label
+%  uvDB$EventType<-uvDB$Outcome
+%  uvDB<-uvDB[,c("uPOS","PosStd","Exon","Experiment","P_B","label","EventType",day5,day14,cnOffset5,cnOffset14)]
+%  rownames(uvDB)<-NULL
+%  temp<-uvDB
+%  n<-nrow(temp)
+%  tall<-NULL
+%  for (i in 1:2){
+%    replic<-paste0("R",i)
+%    d5<-cbind(as.matrix(temp[,c("uPOS","PosStd","Exon","Experiment","P_B","label","EventType",day5[i],cnOffset5[i])]),
+%              rep("D5",n),rep(replic,n))
+%    d14<-cbind(as.matrix(temp[,c("uPOS","PosStd","Exon","Experiment","P_B","label","EventType",day14[i],cnOffset14[i])]),
+%              rep("D14",n),rep(replic,n))
+%    colnames(d5)<-colnames(d14)<-NULL
+%    tall<-rbind(tall,d5,d14)
+%  }
+%  uvDB<-data.frame(tall)
+%  rm(temp)
+%  colnames(uvDB)<-c("variant","PosStd","Exon","Experiment","p.b","label","eventtype","count","offset","day","replicate")
+%  uvDB$PosStd<-as.numeric(uvDB$PosStd)
+%  uvDB$count<-as.numeric(uvDB$count)
+%  uvDB$offset<-as.numeric(uvDB$offset)
+%  uvDB<-uvDB[!is.na(uvDB$count),]
+%  uvDB$day<-factor(uvDB$day)
+%  uvDB$replicate<-factor(uvDB$replicate)
+%  uvDB$variant<-factor(uvDB$variant)
+%  uvDB$Exon<-factor(uvDB$Exon)
+%  uvDB$p.b<-factor(uvDB$p.b)
+%  uvDB$label<-factor(uvDB$label)
+%  uvDB$batchE<-uvDB$Experiment   ## batch=experiment
+%  ## Experiment by Rep
+%  uvDB$ER<-paste0("E",uvDB$Experiment,".",uvDB$replicate)
+%  uvDB$ER<-factor(uvDB$ER)
+%  uvDB$batch<-as.numeric(uvDB$ER)  ## More refined batch variable
+%  table(uvDB$ER,useNA="always")
+%  table(uvDB$batch,useNA="always")
+%  head(uvDB)
+%  summary(uvDB)
+%%  end.rcode
+
+\newpage
+\section{Exploratory Mixed Effects Model of The Labeled Data}
+
+\subsection{Setup Data Structure}
+
+The following code chunk creates the final analysis data set.  This
+structure becomes the new data base matrix {\texttt{uvDB}}.  This
+structure is used for this section's exploratory analysis and for the
+final VarCall analysis.
+
+%% begin.rcode, fig.width=6.5, fig.height=4.0
+%  D5<-uvDB[uvDB$day=="D5",]
+%  D14<-uvDB[uvDB$day=="D14",]
+%  ## NOTE: there are 18 variants that appear four times at Day 14: In 2 reps * 2 experiments:
+%  table(tbl<-table(D14$variant))
+%  tbl[tbl>2]
+%  quads<-names(tbl[tbl>2])
+%  D14$ID<-paste0(D14$variant,"_",D14$replicate,"_",D14$Experiment)
+%  ## The "QUADS":
+%  D14$ID[D14$variant %in% quads]
+%  length(unique(D14$ID))
+%  D5$ID<-paste0(D5$variant,"_",D5$replicate,"_",D5$Experiment)
+%  table(D14$ID %in% D5$ID)  ## some D14 variants not seen at D5
+%  table(D5$ID %in% D14$ID)  ## all D5 variants are seen at D14
+%  D14<-D14[D14$ID %in% D5$ID,]
+%  table(D5$ID == D14$ID)
+%  #########################################################################
+%  ## This is the Normalized log(Ratio) Used in the Classification Model: ##
+%  #########################################################################
+%  D14$lRatio<-(log(D14$count) - log(D14$offset)) - (log(D5$count) - log(D5$offset))
+%  hist(D14$lRatio,nclass=100,main="Log Ratio")
+%  ############################################
+%  ## Data Set for Analysis of Labeled Data: ##
+%  ############################################
+%  uvKnown<-D14[!is.na(D14$label),]
+%  #################################
+%  ## Data Set for Full Analysis: ##
+%  #################################
+%  uvDB<-D14
+%  uvDB$ER<-factor(uvDB$ER)
+%  uvDB$batch<-as.numeric(uvDB$ER)  ## More refined batch variable
+%  table(uvDB$ER)
+%  table(uvDB$batch)
+%  temp<-unique(uvDB[,c("ER","batch")])
+%  batches<-temp$batch
+%  names(batches)<-as.character(temp$ER)
+%  rm(temp)
+%  batches<-sort(batches)
+%  batches
+%% end.rcode
+
+\subsection{Mixed Effects Model for the Labeled Variants}
+
+Here we fit a linear mixed model using the labeled variants.  The
+model includes a fixed effect for pathogenicity status
+(\texttt{label}) and (nested) random effects for variant and exon and
+random intercept for label.
+
+%% begin.rcode, fig.width=3.5, fig.height=4.0
+%  lme.out2<-lme(lRatio ~ -1 + label, random= ~ -1+label|Exon/variant,data=uvKnown)
+%  summary(lme.out2)
+%  re<-ranef(lme.out2)
+%  names(re)
+%  names(re[[2]])
+%% end.rcode
+
+In the following code chunk, we check modeling assumptions.
+
+%% begin.rcode, fig.width=7.5, fig.height=8.5
+% par(mfrow=c(2,2))
+%  qqnorm(re[["Exon"]][,1],main="Benign Exon Effects")
+%  abline(a=0,b=sd((re[["Exon"]][,1])),lwd=2,col=2)
+%  qqnorm(re[["Exon"]][,2],main="Pathogenic Exon Effects")
+%  abline(a=0,b=sd((re[["Exon"]][,2])),lwd=2,col=2)
+%  qqnorm(re[["variant"]][,1],main="Variant Effects")
+%  abline(a=0,b=sd((re[["variant"]][,1])),lwd=2,col=2)
+%  qqnorm(residuals(lme.out2),main="Replicate Effects (Residuals)")
+%  abline(a=0,b=sd(residuals(lme.out2)),lwd=2,col=2)
+%% end.rcode
+
+
+Looks like a t--distribution with approximately five degrees of
+freedom might be needed for the measurement model:
+
+%% begin.rcode, fig.width=7.5, fig.height=8.5
+%  par(mfrow=c(2,2))
+%  q<-qt(p=((1:nrow(uvKnown) - 0.5)/nrow(uvKnown)),df=5)
+%  emp.q<-sort(residuals(lme.out2))
+%  plot(q,emp.q,main="5df T for Residuals")
+%  abline(a=0,b=coef(lm(emp.q~-1+q)),lwd=2,col=2)
+%  boxplot(residuals(lme.out2)~uvKnown$Exon,main="Residuals by Exon")
+%  ##boxplot(residuals(lme.out2)~uvKnown$p.b,main="Residuals by Pathogenicity")
+%  boxplot(residuals(lme.out2)~uvKnown$label,main="Residuals by Pathogenicity")
+%  ##boxplot(residuals(lme.out2)~uvKnown$Exon + uvKnown$p.b,
+%  ##        main="Residuals by Exon and Pathogenicity")
+%% end.rcode
+
+
+\section{Wrap--Up}
+
+%% begin.rcode
+%  NCIuvDB<-uvDB
+%  save(NCIuvDB,file="nciDB.RData")
+%  gc(); save.image()
+%% end.rcode
+
+\end{document}
+
+
+
+
+%% begin.rcode, fig.width=6.5, fig.height=8.5
+%% end.rcode
+
+
+%% begin.rcode, fig.width=7.5, fig.height=3.5
+%% end.rcode
+
+%% begin.rcode, fig.width=6.5, fig.height=8.0
+%% end.rcode
+
+%% begin.rcode, fig.width=3.5, fig.height=4.0
+%% end.rcode
+
+%% begin.rcode, fig.width=7.5, fig.height=8.5
+% par(mfrow=c(2,2))
+%% end.rcode
+
+%% begin.rcode, fig.width=7.5, fig.height=8.5
+% par(mfrow=c(2,2))
+%% end.rcode
+
+% end.rcode
