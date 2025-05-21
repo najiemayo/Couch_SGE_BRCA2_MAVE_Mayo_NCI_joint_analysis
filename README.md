@@ -46,7 +46,7 @@ This should be done within one miniute.
 
 
 - To run :
-  - Download the full data files `combined.raw.tsv`, `variant_type_for_train.csv`, `MAVEpostProbsPt2.csv`, `shyamBRCA2allCounts.txt` from GSEXXXX (link here) and put it in the VarCall folder
+  - Download the full data files `combined.raw.tsv`, `variant_type_for_train.csv`, `MAVEpostProbsPt2.csv`, `shyamBRCA2allCounts.txt` from GSEXXXX (link here) and put them in the VarCall folder
   - In terminal, run R script. "Rscript runRtex.R"
 
 - Specified prior:
@@ -93,24 +93,24 @@ Two intermediate folders will be generated:
 
 change setting of running `mcmc.pars` in `BRCA2CombinedMave24.ldaER.Run1.Rtex` file. 
 
-%% begin.rcode
-%  ## T degrees of freedom for measurement error model
-%  t.df<-5
-%  ##
-%  ## Prior Probability Pathogenic, beta distribution parameters:
-%  beta.a<-2.0
-%  beta.b<-8.0  ##mean=0.20, ESS = 10
-%  ## Set List of MCMC Control Parameters:
-%  mcmc.pars<-list(iter=10000, ## short run
-%                  burn=5000,
-%                  thin=10)
-%  ##mcmc.pars<-list(iter=150000, ## long run
-%  ##               burn=50000,
-%  ##               thin=10)
-%  ##mcmc.pars<-list(iter=550000, ## longer run
-%  ##                 burn=50000,
-%  ##                 thin=25)
-%% end.rcode
+%% begin.rcode\
+%  ## T degrees of freedom for measurement error model\
+%  t.df<-5\
+%  ##\
+%  ## Prior Probability Pathogenic, beta distribution parameters:\
+%  beta.a<-2.0\
+%  beta.b<-8.0  ##mean=0.20, ESS = 10\
+%  ## Set List of MCMC Control Parameters:\
+%  mcmc.pars<-list(iter=10000, ## short run\
+%                  burn=5000,\
+%                  thin=10)\
+%  ##mcmc.pars<-list(iter=150000, ## long run\
+%  ##               burn=50000,\
+%  ##               thin=10)\
+%  ##mcmc.pars<-list(iter=550000, ## longer run\
+%  ##                 burn=50000,\
+%  ##                 thin=25)\
+%% end.rcode\
 
 Three settings with parameters are prepared in the file, comment with `##` or uncomment by removing `##` for `mcmc.pars`.
 
