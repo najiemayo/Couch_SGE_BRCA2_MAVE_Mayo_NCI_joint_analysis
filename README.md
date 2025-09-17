@@ -9,7 +9,7 @@ This repository provides the VarCall model tool used in the analysis of high thr
 - [License](#license)
 
 # Overview
-``VarCall`` aims to provide a comprehensive statistical model for SGE data analysis, including the modeling of batch effects, and the prediction of variant effects. The package utilizes a Bayesian hierachical two Gaussian components modeling. The package should be able to run on all major platforms (e.g. BSD, GNU/Linux, OS X, Windows) as long as R and related R Packages are installed.
+``VarCall`` aims to provide a comprehensive statistical model for SGE data analysis, including the modeling of batch effects, and the prediction of variant effects. The package utilizes a Bayesian hierarchical two Gaussian components modeling. The package should be able to run on all major platforms (e.g. BSD, GNU/Linux, OS X, Windows) as long as R and related R Packages are installed.
 
 # System Requirements
 ## Hardware requirements
