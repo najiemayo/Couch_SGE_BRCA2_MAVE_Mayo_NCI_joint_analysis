@@ -1,5 +1,5 @@
 library(knitr)
-setwd("/research/bsi/projects/breast/s108235.tripneg_Couch/projects/s108235.tripneg/breast_requests/Predisposition_genes/Gilbert/varcall/Rtex/")
+setwd("/pathtowhereyourRtext/Rtex/")
 
 knit("mayoPreprocessing.Rtex")
 cat('finsihed mayoPreprocessing.Rtex\n')
