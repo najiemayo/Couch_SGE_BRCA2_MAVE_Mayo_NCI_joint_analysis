@@ -46,8 +46,9 @@ This should be done within one miniute.
 
 
 - To run :
-  - Download the full data files `combined.raw.tsv`, `variant_type_for_train.csv`, `shyamBRCA2allCounts.txt` from data folder and put them in the VarCall folder
+  - Download the full data files `combined.raw.tsv`, `variant_type_for_train.csv`, `shyamBRCA2allCounts.txt` and put them in the VarCall folder
   - In terminal, run R script. "Rscript runRtex.R"
+  - Check if your working directory corresponds to where the script is looking for. 
 
 - Specified prior:
   - Currently the prior is set to a mean value of 0.2 using a beta distribution Beta(2, 8). The change the prior, in `BRCA2CombinedMave24.ldaER.Run1.Rtex` file, modifiy the line `beta.a<-2.0` and `beta.b<-8.0`. 
