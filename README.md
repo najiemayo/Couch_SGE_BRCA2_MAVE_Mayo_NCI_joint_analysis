@@ -46,7 +46,7 @@ This should be done within one miniute.
 
 
 - To run :
-  - Download the full data files `combined.raw.tsv`, `variant_type_for_train.csv`, `MAVEpostProbsPt2.csv`, `shyamBRCA2allCounts.txt` from GSEXXXX (link here) and put them in the VarCall folder
+  - Download the full data files `combined.raw.tsv`, `variant_type_for_train.csv`, `MAVEpostProbsPt2.csv`, `shyamBRCA2allCounts.txt` from data folder and put them in the VarCall folder
   - In terminal, run R script. "Rscript runRtex.R"
 
 - Specified prior:
